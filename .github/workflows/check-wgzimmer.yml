@@ -42,7 +42,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MAX_PRICE: "950"
           MIN_MOVING_DATE: "2027-01-01"
-          WG_REGIONS: "luzern"
+          WG_REGIONS: "luzern,nidwalden,obwalden,zug"
           STATE_FILE: state/seen_wg.json
           ALWAYS_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
           STATUS_NOTE: ${{ github.event_name == 'workflow_dispatch' && '🧪 wgzimmer Testnachricht (manuell ausgelöst)' || '' }}

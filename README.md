@@ -49,11 +49,20 @@ venv/bin/python check_flatfox.py --selftest   # Filter-Test
 venv/bin/python check_flatfox.py --dry-run     # Live-Check ohne Versand
 ```
 
-## Später: weitere Portale (wgzimmer, Homegate, ImmoScout24)
+## wgzimmer.ch (via Playwright)
 
-Diese Portale wehren automatische Abfragen aktiv ab (CAPTCHA/CSRF). Geplanter
-Schritt 2: deren **eigene E-Mail-Alerts** an ein separates Postfach leiten und
-von dort per IMAP nach Telegram weiterreichen – so landet alles in Telegram.
+[`check_wgzimmer.py`](check_wgzimmer.py) prüft zusätzlich **wgzimmer.ch**
+(Regionen Luzern, Nidwalden, Obwalden, Zug). wgzimmer schützt die Suche mit
+reCAPTCHA v3 + CSRF, daher steuert das Skript einen echten Chromium-Browser
+(Playwright) – das funktioniert auch aus GitHub Actions. Workflow:
+[`check-wgzimmer.yml`](.github/workflows/check-wgzimmer.yml), alle 30 Min.
+Eigener Zustand (`seen_wg.json`, pk-Präfix `wg:`), gleiche Telegram-Secrets.
+
+## Später: Homegate & ImmoScout24
+
+Diese wehren automatische Abfragen mit DataDome-CAPTCHA ab. Geplanter Schritt:
+deren **eigene E-Mail-Alerts** an ein Postfach leiten und per IMAP nach Telegram
+weiterreichen.
 
 ## Konfiguration (Umgebungsvariablen)
 
