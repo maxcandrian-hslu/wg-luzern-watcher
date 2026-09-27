@@ -46,6 +46,7 @@ Umgebungsvariablen
 from __future__ import annotations
 
 import os
+import re
 import sys
 import json
 import html as htmllib
@@ -140,13 +141,123 @@ def is_senior_wg(text: str) -> bool:
 # --- Auswertung eines Inserats ---------------------------------------------
 
 def moving_ok(moving_date) -> bool:
-    """True, wenn Einzug flexibel/leer ODER >= MIN_MOVING_DATE."""
+    """True, wenn Einzug flexibel/leer ODER >= MIN_MOVING_DATE (fuer Selbsttest)."""
     if not moving_date:
         return True
     try:
         return str(moving_date)[:10] >= MIN_MOVING_DATE
     except Exception:
         return True
+
+
+# --- Einzugsdatum aus dem Beschreibungstext lesen ---------------------------
+
+_MONTHS = {
+    "januar": 1, "jan": 1, "februar": 2, "feb": 2, "maerz": 3, "marz": 3,
+    "mar": 3, "april": 4, "apr": 4, "mai": 5, "juni": 6, "jun": 6,
+    "juli": 7, "jul": 7, "august": 8, "aug": 8, "september": 9, "sept": 9,
+    "sep": 9, "oktober": 10, "okt": 10, "november": 11, "nov": 11,
+    "dezember": 12, "dez": 12,
+}
+_MONTH_RE = ("januar|jan|februar|feb|maerz|marz|mar|april|apr|mai|juni|jun|"
+             "juli|jul|august|aug|september|sept|sep|oktober|okt|november|nov|"
+             "dezember|dez")
+
+# "ab sofort", "per sofort", "sofort beziehbar/verfuegbar/frei", "ab heute"
+_IMMEDIATE_RE = re.compile(
+    r"\b(ab|per)\s+sofort\b|\bsofort\s+(beziehbar|verfuegbar|frei|zu\s*haben|einziehen)"
+    r"|\bab\s+heute\b|\bper\s+heute\b|\bsofort\s+verfuegbar\b")
+_AVAIL_KW = (r"\b(?:ab dem|frei ab|verfuegbar ab|beziehbar ab|mieten ab|einzug ab|"
+             r"bezug ab|ab|per|einzug|bezug|verfuegbar)")
+
+
+def _mk_date(day, month, year):
+    """Baut eine ISO-Datumszeichenkette; fehlendes Jahr -> naechstes Vorkommen."""
+    try:
+        month = int(month)
+        day = int(day) if day else 1
+    except (TypeError, ValueError):
+        return None
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    if year:
+        year = int(year)
+        if year < 100:
+            year += 2000
+    else:
+        today = date.today()
+        year = today.year
+        if (month, day) < (today.month, today.day):
+            year += 1
+    if not (today_year() - 1 <= year <= today_year() + 3):
+        return None
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def today_year():
+    return date.today().year
+
+
+def find_text_dates(text: str):
+    """Findet HOCH-sichere Einzugsdaten im Text; gibt sortierte ISO-Liste.
+
+    Nur: (A) vollstaendige Schweizer Daten mit 4-stelligem Jahr (1.3.2027) oder
+    (B) Daten direkt hinter einem Verfuegbarkeits-Stichwort (ab/per/frei ab/…).
+    Lose Monatsnamen ohne solchen Kontext werden bewusst ignoriert, um
+    Falsch-Treffer (z.B. englisches "January", "3.5 Zimmer") zu vermeiden.
+    """
+    t = _norm(text)
+    dates = []
+
+    # A) 1.3.2027 / 01.03.2027 (4-stelliges Jahr) – ueberall.
+    for m in re.finditer(r"\b(\d{1,2})\.(\d{1,2})\.(20\d{2})\b", t):
+        d = _mk_date(m.group(1), m.group(2), m.group(3))
+        if d:
+            dates.append(d)
+
+    # B) Verankert: <Stichwort> 1.3.[yy] (mit zweitem Punkt -> "3.5 Zimmer" faellt raus)
+    for m in re.finditer(_AVAIL_KW + r"\W{0,3}(\d{1,2})\.(\d{1,2})\.(\d{2,4})?", t):
+        d = _mk_date(m.group(1), m.group(2), m.group(3))
+        if d:
+            dates.append(d)
+
+    # B2) Verankert: <Stichwort> [1.] Monatsname [yyyy]  (Wortgrenzen!)
+    for m in re.finditer(
+            _AVAIL_KW + r"\W{0,3}(?:(\d{1,2})\.?\s*)?\b(" + _MONTH_RE + r")\b\.?\s*(\d{4})?", t):
+        month = _MONTHS.get(m.group(2))
+        if month:
+            d = _mk_date(m.group(1), month, m.group(3))
+            if d:
+                dates.append(d)
+
+    return sorted(set(dates))
+
+
+def availability(listing, text):
+    """Bestimmt (kind, iso_date_or_None, human).
+
+    kind: 'dated' (konkretes Datum), 'immediate' (ab sofort), 'flexible' (n.V.)
+    Reihenfolge: festes Datum (Typ 'dat') > Datum aus Text > sofort > flexibel.
+    """
+    md = listing.get("moving_date")
+    mdt = listing.get("moving_date_type")
+
+    if md and mdt == "dat":
+        d = str(md)[:10]
+        return "dated", d, d
+
+    tdates = find_text_dates(text)
+    if tdates:
+        return "dated", tdates[0], tdates[0] + " (aus Text)"
+
+    if mdt == "imm" or _IMMEDIATE_RE.search(_norm(text)):
+        return "immediate", None, "ab sofort"
+
+    if md:  # Datum vorhanden, aber Typ nicht 'dat'
+        d = str(md)[:10]
+        return "dated", d, d
+
+    return "flexible", None, "nach Vereinbarung"
 
 
 def price_of(listing):
@@ -172,19 +283,29 @@ def evaluate_listing(listing):
     if not in_region(zipcode):
         return False, None, f"Region {zipcode}"
 
-    if not moving_ok(listing.get("moving_date")):
-        return False, None, f"Einzug {listing.get('moving_date')}"
-
     text = " ".join(str(listing.get(k) or "") for k in
                     ("public_title", "description", "description_title", "pitch_title"))
+
+    # Einzug: strukturiertes Datum ODER aus dem Beschreibungstext lesen.
+    avail_kind, avail_date, human = availability(listing, text)
+    if avail_kind == "dated" and avail_date < MIN_MOVING_DATE:
+        return False, None, f"Einzug {avail_date} vor {MIN_MOVING_DATE}"
+    if avail_kind == "immediate":
+        return False, None, "ab sofort (nicht im Zeitraum)"
+
     if is_women_only(text):
         return False, None, "nur Frauen"
     if is_senior_wg(text):
         return False, None, "Senioren-WG"
 
-    url = listing.get("url") or listing.get("short_url") or ""
-    if url.startswith("/"):
-        url = BASE + url.replace("/en/", "/de/", 1)
+    # Kurz-URL /{pk}/ verwendet (leitet zuverlaessig weiter); /de/flat/... gibt 404.
+    short = listing.get("short_url") or ""
+    if short:
+        full_url = BASE + short
+    elif listing.get("url"):
+        full_url = BASE + listing["url"]  # /en/flat/... funktioniert, /de/ nicht
+    else:
+        full_url = BASE
 
     room = {
         "pk": listing.get("pk"),
@@ -193,10 +314,11 @@ def evaluate_listing(listing):
         "city": listing.get("city") or "",
         "street": listing.get("street") or "",
         "rooms": listing.get("number_of_rooms"),
-        "moving_date": listing.get("moving_date") or "n. Vereinbarung",
+        "moving_human": human,
+        "flexible": (avail_kind == "flexible"),
         "temporary": bool(listing.get("is_temporary")),
         "title": (listing.get("public_title") or "").strip(),
-        "url": url,
+        "url": full_url,
     }
     return True, room, None
 
@@ -270,11 +392,15 @@ SEARCH_LINK = (
 def format_room(r) -> str:
     ort = " ".join(x for x in [str(r["zipcode"] or ""), r["city"]] if x).strip()
     kopf = r["street"] or r["title"] or ort or "WG-Zimmer"
+    if r["flexible"]:
+        einzug = "Einzug: nach Vereinbarung ⚠️ Zeitraum selbst prüfen"
+    else:
+        einzug = f"Einzug {r['moving_human']}"
     zeile2_bits = [
         f"CHF {r['price']}",
         ort if ort and ort not in kopf else "",
         f"{r['rooms']:.0f} Zi." if isinstance(r["rooms"], (int, float)) else "",
-        f"Einzug {r['moving_date']}",
+        einzug,
     ]
     if r["temporary"]:
         zeile2_bits.append("⚠️ befristet – Dauer prüfen")
@@ -400,6 +526,21 @@ SELFTEST_LISTINGS = [
      "street": "Gerliswilstrasse 5", "price_display": 890, "number_of_rooms": 1.0,
      "moving_date": None, "is_temporary": False, "reserved": False,
      "public_title": "Helles Zimmer", "description": "Gemischte 3er-WG, Studenten willkommen."},
+    # Treffer: kein struktur. Datum, aber Text nennt "ab 1. März 2027"
+    {"pk": 10, "object_category": "SHARED", "zipcode": "6003", "city": "Luzern",
+     "price_display": 900, "moving_date": None, "moving_date_type": "agr",
+     "is_temporary": False, "reserved": False, "public_title": "WG-Zimmer",
+     "description": "Das Zimmer ist frei ab 1. März 2027, gemischte WG."},
+    # Ausschluss: Text sagt "ab sofort" (nicht im Zeitraum)
+    {"pk": 11, "object_category": "SHARED", "zipcode": "6005", "city": "Luzern",
+     "price_display": 850, "moving_date": None, "moving_date_type": "agr",
+     "is_temporary": False, "reserved": False, "public_title": "Zimmer",
+     "description": "Zimmer ab sofort verfuegbar in netter WG."},
+    # Ausschluss: Text nennt Datum vor Zeitraum (ab Oktober 2026)
+    {"pk": 12, "object_category": "SHARED", "zipcode": "6004", "city": "Luzern",
+     "price_display": 800, "moving_date": None, "moving_date_type": "agr",
+     "is_temporary": False, "reserved": False, "public_title": "Zimmer",
+     "description": "Verfuegbar ab Oktober 2026."},
 ]
 
 
@@ -410,7 +551,8 @@ def selftest() -> int:
         match, room, reason = evaluate_listing(l)
         results[l["pk"]] = (match, reason)
 
-    expected = {1: True, 2: False, 3: False, 4: False, 5: True, 6: False, 7: False, 8: False, 9: True}
+    expected = {1: True, 2: False, 3: False, 4: False, 5: True, 6: False, 7: False,
+                8: False, 9: True, 10: True, 11: False, 12: False}
     print("Selbsttest evaluate_listing:")
     for pk, exp in expected.items():
         got = results[pk][0]
@@ -432,6 +574,11 @@ def selftest() -> int:
         ("moving None ok", moving_ok(None) is True),
         ("moving 2027-03 ok", moving_ok("2027-03-01") is True),
         ("moving 2026-10 nicht ok", moving_ok("2026-10-01") is False),
+        ("Text 'ab 1. März 2027'", "2027-03-01" in find_text_dates("frei ab 1. März 2027")),
+        ("Text 'ab 1.3.2027'", "2027-03-01" in find_text_dates("Einzug ab 1.3.2027")),
+        ("Text 'ab Oktober 2026'", "2026-10-01" in find_text_dates("verfügbar ab Oktober 2026")),
+        ("kein Falsch-Positiv '3.5 Zimmer, 76 m²'", find_text_dates("3.5 Zimmer, 76 m²") == []),
+        ("'ab sofort' erkannt", bool(_IMMEDIATE_RE.search(_norm("Zimmer ab sofort frei")))),
     ]
     for label, passed in checks:
         ok = ok and passed
@@ -459,7 +606,8 @@ def main(argv) -> int:
 
     print(f"Gefundene passende WG-Zimmer: {len(rooms)}")
     for r in rooms:
-        print(f"  - {r['zipcode']} {r['city']} | CHF {r['price']} | Einzug {r['moving_date']}"
+        einzug = "nach Vereinbarung" if r["flexible"] else r["moving_human"]
+        print(f"  - {r['zipcode']} {r['city']} | CHF {r['price']} | Einzug {einzug}"
               f"{' | befristet' if r['temporary'] else ''} | {r['url']}")
     for a in anomalies:
         print("  ! " + a)
