@@ -1,0 +1,55 @@
+name: WG-Zimmer Check (Flatfox)
+
+on:
+  schedule:
+    # Alle 15 Minuten. Zeiten sind UTC und nicht sekundengenau.
+    - cron: "*/15 * * * *"
+    # 2x/Woche Status-Update (Mo & Do, 07:07 UTC = 09:07 Europe/Zurich Sommer).
+    - cron: "7 7 * * 1,4"
+  workflow_dispatch: {}
+
+concurrency:
+  group: wg-flatfox-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Abhaengigkeiten installieren
+        run: pip install -r requirements.txt
+
+      - name: Zustand laden (Wiederhol-Schutz)
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: wg-flatfox-state-${{ github.run_id }}
+          restore-keys: wg-flatfox-state-
+
+      - name: WG-Zimmer pruefen
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MAX_PRICE: "950"
+          MIN_MOVING_DATE: "2027-01-01"
+          STATE_FILE: state/seen.json
+          # Immer senden bei: manuellem Start (Test) ODER dem 2x/Woche-Status-Lauf.
+          ALWAYS_NOTIFY: ${{ (github.event_name == 'workflow_dispatch' || github.event.schedule == '7 7 * * 1,4') && '1' || '0' }}
+          STATUS_NOTE: ${{ github.event_name == 'workflow_dispatch' && '🧪 Testnachricht (manuell ausgelöst)' || (github.event.schedule == '7 7 * * 1,4' && '🟢 Regelmäßiger Status (Mo & Do) – der WG-Bot läuft.' || '') }}
+        run: python check_flatfox.py
+
+      - name: Zustand speichern
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: wg-flatfox-state-${{ github.run_id }}
