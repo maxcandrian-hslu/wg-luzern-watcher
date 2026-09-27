@@ -1,0 +1,56 @@
+name: WG-Zimmer Check (wgzimmer.ch)
+
+on:
+  schedule:
+    # Alle 30 Minuten, versetzt zum Flatfox-Check.
+    - cron: "13,43 * * * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: wg-wgzimmer-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Python einrichten
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Abhaengigkeiten installieren
+        run: pip install -r requirements.txt
+
+      - name: Playwright Chromium installieren
+        run: python -m playwright install --with-deps chromium
+
+      - name: Zustand laden
+        uses: actions/cache/restore@v4
+        with:
+          path: state
+          key: wg-wgzimmer-state-${{ github.run_id }}
+          restore-keys: wg-wgzimmer-state-
+
+      - name: wgzimmer pruefen
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MAX_PRICE: "950"
+          MIN_MOVING_DATE: "2027-01-01"
+          WG_REGIONS: "luzern"
+          STATE_FILE: state/seen_wg.json
+          ALWAYS_NOTIFY: ${{ github.event_name == 'workflow_dispatch' && '1' || '0' }}
+          STATUS_NOTE: ${{ github.event_name == 'workflow_dispatch' && '🧪 wgzimmer Testnachricht (manuell ausgelöst)' || '' }}
+        run: python check_wgzimmer.py
+
+      - name: Zustand speichern
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state
+          key: wg-wgzimmer-state-${{ github.run_id }}
