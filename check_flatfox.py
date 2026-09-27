@@ -162,6 +162,34 @@ _MONTHS = {
 _MONTH_RE = ("januar|jan|februar|feb|maerz|marz|mar|april|apr|mai|juni|jun|"
              "juli|jul|august|aug|september|sept|sep|oktober|okt|november|nov|"
              "dezember|dez")
+_SEASONS = {"fruehling": 3, "fruehjahr": 3, "sommer": 6, "herbst": 9, "winter": 12}
+
+# Satzteile, die fuer den Nutzer wichtig sind (Verfuegbarkeit / Alter / Geschlecht):
+# werden als Zitat in die Telegram-Nachricht uebernommen.
+_HL_RE = re.compile(
+    r"(ab sofort|per sofort|frei ab|verfuegbar ab|verfuegbar|einzug|bezug|beziehbar|"
+    r"nach vereinbarung|befristet|zwischenmiete|mindest|mietdauer|monat|semester|"
+    r"jahre? alt|jaehrig|zwischen \d|w/m|m/w|frau|maenn|weiblich|maennlich|mitbewohner)")
+
+
+def extract_highlights(description, max_len=220):
+    """Sucht die 1-2 wichtigsten Saetze (Verfuegbarkeit/Alter/Geschlecht)."""
+    text = re.sub(r"\s+", " ", description or "").strip()
+    text = re.sub(r"[*_]{2,}", "", text)  # Markdown-Betonung (**fett**) entfernen
+    if not text:
+        return ""
+    picked, total = [], 0
+    for s in re.split(r"(?<=[.!?])\s+", text):
+        if _HL_RE.search(_norm(s)):
+            s = s.strip()
+            picked.append(s)
+            total += len(s)
+            if total >= max_len or len(picked) >= 2:
+                break
+    snippet = " ".join(picked)
+    if len(snippet) > max_len:
+        snippet = snippet[:max_len - 1].rstrip() + "…"
+    return snippet
 
 # "ab sofort", "per sofort", "sofort beziehbar/verfuegbar/frei", "ab heute"
 _IMMEDIATE_RE = re.compile(
@@ -229,6 +257,14 @@ def find_text_dates(text: str):
             d = _mk_date(m.group(1), month, m.group(3))
             if d:
                 dates.append(d)
+
+    # C) Jahreszeit + 4-stelliges Jahr ("ab Fruehling 2027"); nicht nach "bis".
+    for m in re.finditer(r"\b(fruehling|fruehjahr|sommer|herbst|winter)\s*(20\d{2})", t):
+        if re.search(r"\bbis\s+$", t[max(0, m.start() - 6):m.start()]):
+            continue
+        d = _mk_date(1, _SEASONS[m.group(1)], m.group(2))
+        if d:
+            dates.append(d)
 
     return sorted(set(dates))
 
@@ -318,6 +354,7 @@ def evaluate_listing(listing):
         "flexible": (avail_kind == "flexible"),
         "temporary": bool(listing.get("is_temporary")),
         "title": (listing.get("public_title") or "").strip(),
+        "highlight": extract_highlights(listing.get("description") or ""),
         "url": full_url,
     }
     return True, room, None
@@ -405,9 +442,11 @@ def format_room(r) -> str:
     if r["temporary"]:
         zeile2_bits.append("⚠️ befristet – Dauer prüfen")
     zeile2 = " · ".join(b for b in zeile2_bits if b)
-    return (f"🏠 <b>{htmllib.escape(kopf)}</b>\n"
-            f"{htmllib.escape(zeile2)}\n"
-            f"🔗 <a href=\"{htmllib.escape(r['url'])}\">Inserat ansehen</a>")
+    lines = [f"🏠 <b>{htmllib.escape(kopf)}</b>", htmllib.escape(zeile2)]
+    if r.get("highlight"):
+        lines.append(f"💬 <i>{htmllib.escape(r['highlight'])}</i>")
+    lines.append(f"🔗 <a href=\"{htmllib.escape(r['url'])}\">Inserat ansehen</a>")
+    return "\n".join(lines)
 
 
 TELEGRAM_LIMIT = 3800  # Sicherheitsgrenze unter Telegrams 4096 Zeichen
@@ -579,6 +618,12 @@ def selftest() -> int:
         ("Text 'ab Oktober 2026'", "2026-10-01" in find_text_dates("verfügbar ab Oktober 2026")),
         ("kein Falsch-Positiv '3.5 Zimmer, 76 m²'", find_text_dates("3.5 Zimmer, 76 m²") == []),
         ("'ab sofort' erkannt", bool(_IMMEDIATE_RE.search(_norm("Zimmer ab sofort frei")))),
+        ("'ab Frühling 2027'", "2027-03-01" in find_text_dates("frei ab Frühling 2027")),
+        ("Jahreszeit ohne Jahr ignoriert", find_text_dates("im Sommer grillieren wir") == []),
+        ("'renoviert Frühjahr 2016' ignoriert", find_text_dates("Frühjahr 2016 renoviert") == []),
+        ("'bis Sommer 2027' ignoriert", find_text_dates("Vertrag läuft bis Sommer 2027") == []),
+        ("Highlight Alter/Geschlecht", "55" in extract_highlights(
+            "Tolle Lage. Ich (weiblich und 55 Jahre alt) vermiete ein Zimmer.")),
     ]
     for label, passed in checks:
         ok = ok and passed
