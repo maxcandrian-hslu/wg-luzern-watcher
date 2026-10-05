@@ -55,6 +55,7 @@ ENTRY_JS = """(els) => els.map(li => {
   return {
     id: (li.id || '').replace('row-', ''),
     href: a ? a.getAttribute('href') : '',
+    created: t('.create-date'),
     fromdate: t('.from-date'),
     cost: t('.cost'),
     state: t('.state')
@@ -173,6 +174,13 @@ def evaluate_entry(e):
     url = BASE + e["href"] if e.get("href", "").startswith("/") else e.get("href", "")
     # Ort/Beschreibung aufteilen: "Luzern <Ort> <Beschreibung...>"
     ort = " ".join(tokens[:2]) if len(tokens) > 1 else state[:40]
+    # Aufgabedatum (fuer Sortierung "neueste zuerst").
+    cm = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", _clean(e.get("created", "")))
+    created_iso = ""
+    if cm:
+        cd = _iso(cm.group(1), cm.group(2), cm.group(3))
+        created_iso = cd.isoformat() if cd else ""
+
     room = {
         "pk": "wg:" + e.get("id", url),
         "price": price,
@@ -181,6 +189,7 @@ def evaluate_entry(e):
         "temporary": temporary,
         "unbefristet": unbefristet,
         "highlight": extract_highlights(state, max_len=200),
+        "created": created_iso,
         "url": url,
     }
     return True, room, None
@@ -203,22 +212,36 @@ def format_room(r):
 TELEGRAM_LIMIT = 3800
 
 
-def build_messages(new_rooms, all_count, anomalies, send_summary):
+def _chunk(header, rooms):
+    """Verteilt header + ALLE Zimmer-Bloecke auf Nachrichten < TELEGRAM_LIMIT."""
+    messages = []
+    current = header
+    for block in (format_room(r) for r in rooms):
+        if len(current) + len(block) + 2 > TELEGRAM_LIMIT:
+            messages.append(current)
+            current = block
+        else:
+            current = (current + "\n\n" + block) if current else block
+    if current:
+        messages.append(current)
+    return messages
+
+
+def build_messages(new_rooms, all_rooms, anomalies, send_summary):
+    """Listet IMMER ALLE betroffenen Zimmer auf (ggf. mehrere Nachrichten)."""
     messages = []
     if new_rooms:
         head = ("neues WG-Zimmer (wgzimmer)" if len(new_rooms) == 1
                 else f"{len(new_rooms)} neue WG-Zimmer (wgzimmer)")
-        current = f"✨ <b>{head}</b> (Region Luzern, ≤ CHF {MAX_PRICE})"
-        for block in (format_room(r) for r in new_rooms):
-            if len(current) + len(block) + 2 > TELEGRAM_LIMIT:
-                messages.append(current)
-                current = block
-            else:
-                current += "\n\n" + block
-        messages.append(current)
+        messages = _chunk(f"✨ <b>{head}</b> (Region Luzern, ≤ CHF {MAX_PRICE})", new_rooms)
     elif send_summary:
-        messages.append(f"🟢 <b>wgzimmer-Check läuft.</b> Aktuell {all_count} passende(s) "
-                        f"WG-Zimmer auf wgzimmer.ch (Region Luzern, ≤ CHF {MAX_PRICE}).")
+        if all_rooms:
+            head = (f"🟢 <b>wgzimmer-Check läuft.</b> Aktuell {len(all_rooms)} passende(s) "
+                    f"WG-Zimmer auf wgzimmer.ch (Region Luzern, ≤ CHF {MAX_PRICE}):")
+            messages = _chunk(head, all_rooms)
+        else:
+            messages = ["🟢 <b>wgzimmer-Check läuft.</b> Aktuell keine passenden "
+                        f"WG-Zimmer (Region Luzern, ≤ CHF {MAX_PRICE})."]
 
     tail = []
     if anomalies:
@@ -256,7 +279,7 @@ def main(argv):
                 seen_ids.add(room["pk"])
                 rooms.append(room)
 
-    rooms.sort(key=lambda r: r["price"])
+    rooms.sort(key=lambda r: r.get("created", ""), reverse=True)  # neueste zuerst
     print(f"wgzimmer passende Zimmer: {len(rooms)} (Regionen: {', '.join(REGIONS)})")
     for r in rooms:
         print(f"  - {r['place']} | CHF {r['price']} | {r['moving_human']} | {r['url']}")
@@ -277,7 +300,7 @@ def main(argv):
         print("Nichts Neues – keine Nachricht gesendet.")
         return 0
 
-    messages = build_messages(new_rooms, len(rooms), anomalies, send_summary)
+    messages = build_messages(new_rooms, rooms, anomalies, send_summary)
     note = os.environ.get("STATUS_NOTE", "").strip()
     if first_run and not note:
         note = "🚀 wgzimmer-Check aktiviert – ab jetzt bekommst du neue passende Inserate."

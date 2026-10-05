@@ -355,6 +355,7 @@ def evaluate_listing(listing):
         "temporary": bool(listing.get("is_temporary")),
         "title": (listing.get("public_title") or "").strip(),
         "highlight": extract_highlights(listing.get("description") or ""),
+        "published": listing.get("published") or "",
         "url": full_url,
     }
     return True, room, None
@@ -407,10 +408,10 @@ def fetch_matches():
             if ok:
                 matches.append(room)
 
-    # Doppelte pks entfernen, nach Preis sortieren.
+    # Doppelte pks entfernen, NEUESTE zuerst (nach Veroeffentlichungsdatum).
     seen = set()
     unique = []
-    for r in sorted(matches, key=lambda x: (x["price"] if x["price"] is not None else 9999)):
+    for r in sorted(matches, key=lambda x: x.get("published", ""), reverse=True):
         if r["pk"] in seen:
             continue
         seen.add(r["pk"])
@@ -452,29 +453,41 @@ def format_room(r) -> str:
 TELEGRAM_LIMIT = 3800  # Sicherheitsgrenze unter Telegrams 4096 Zeichen
 
 
+def _chunk(header, rooms):
+    """Verteilt header + ALLE Zimmer-Bloecke auf Nachrichten < TELEGRAM_LIMIT."""
+    messages = []
+    current = header
+    for block in (format_room(r) for r in rooms):
+        if len(current) + len(block) + 2 > TELEGRAM_LIMIT:
+            messages.append(current)
+            current = block
+        else:
+            current = (current + "\n\n" + block) if current else block
+    if current:
+        messages.append(current)
+    return messages
+
+
 def build_messages(new_rooms, all_rooms, anomalies, send_summary):
-    """Baut eine LISTE von Nachrichten (jede < TELEGRAM_LIMIT Zeichen)."""
+    """Baut eine LISTE von Nachrichten (jede < TELEGRAM_LIMIT Zeichen).
+
+    Es werden IMMER ALLE betroffenen Zimmer aufgelistet (ggf. ueber mehrere
+    Nachrichten) – nie nur ein Ausschnitt.
+    """
     messages = []
 
     if new_rooms:
         header = ("neues WG-Zimmer" if len(new_rooms) == 1
                   else f"{len(new_rooms)} neue WG-Zimmer")
-        head_line = f"✨ <b>{header}</b> (Region Luzern, ≤ CHF {MAX_PRICE})"
-        current = head_line
-        for block in (format_room(r) for r in new_rooms):
-            if len(current) + len(block) + 2 > TELEGRAM_LIMIT:
-                messages.append(current)
-                current = block
-            else:
-                current = current + "\n\n" + block
-        messages.append(current)
+        messages = _chunk(f"✨ <b>{header}</b> (Region Luzern, ≤ CHF {MAX_PRICE})", new_rooms)
     elif send_summary:
-        parts = [f"🟢 <b>WG-Bot läuft.</b> Aktuell {len(all_rooms)} passende(s) "
-                 f"WG-Zimmer auf Flatfox (Region Luzern, ≤ CHF {MAX_PRICE})."]
-        parts.extend(format_room(r) for r in all_rooms[:8])
-        if len(all_rooms) > 8:
-            parts.append(f"… und {len(all_rooms) - 8} weitere – siehe Link unten.")
-        messages.append("\n\n".join(parts))
+        if all_rooms:
+            header = (f"🟢 <b>WG-Bot läuft.</b> Aktuell {len(all_rooms)} passende(s) "
+                      f"WG-Zimmer auf Flatfox (Region Luzern, ≤ CHF {MAX_PRICE}):")
+            messages = _chunk(header, all_rooms)
+        else:
+            messages = ["🟢 <b>WG-Bot läuft.</b> Aktuell keine passenden WG-Zimmer "
+                        f"(Region Luzern, ≤ CHF {MAX_PRICE})."]
 
     # Hinweise + Such-Link ans Ende haengen (oder als eigene Nachricht).
     tail_parts = []
